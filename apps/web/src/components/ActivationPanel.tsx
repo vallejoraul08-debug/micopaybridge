@@ -29,13 +29,63 @@ const enTelefono =
 // docs/ESTRATEGIA_300_CUENTAS.md — es el único diseño que no pisa la
 // cláusula anti-sybil del T&C de Make Waves (§7): automatizar la firma del
 // lado del team sería "scripted transactions".
+/**
+ * El plazo para reclamar es de una hora, y nadie se va a quedar mirando la
+ * pantalla ese rato. Si el estado vive solo en memoria, cerrar la pestaña
+ * deja a la persona con su XRP bloqueado y sin el botón para recuperarlo —
+ * el escrow sigue en la cadena, pero habría que armar el EscrowCancel a mano.
+ * Guardarlo aquí es lo que permite volver más tarde y reclamar.
+ */
+const CLAVE_ACTIVACION = "micopay.activacion";
+
+interface ActivacionGuardada {
+  txid: string;
+  signedAt: number;
+  account: string;
+}
+
+function leerActivacion(): ActivacionGuardada | null {
+  try {
+    const crudo = localStorage.getItem(CLAVE_ACTIVACION);
+    if (!crudo) return null;
+    const v = JSON.parse(crudo) as ActivacionGuardada;
+    if (typeof v?.txid !== "string" || typeof v?.signedAt !== "number") return null;
+    // Una semana. Pasado eso lo normal es que ya se haya reclamado; dejar el
+    // registro solo serviría para ofrecer un reclamo que fallaría con
+    // tecNO_TARGET.
+    if (Date.now() - v.signedAt > 7 * 24 * 60 * 60 * 1000) return null;
+    return v;
+  } catch {
+    // Modo incógnito o almacenamiento bloqueado: se degrada al comportamiento
+    // de antes, no se rompe.
+    return null;
+  }
+}
+
+function guardarActivacion(v: ActivacionGuardada): void {
+  try {
+    localStorage.setItem(CLAVE_ACTIVACION, JSON.stringify(v));
+  } catch {
+    /* sin persistencia; el flujo sigue funcionando en esta pestaña */
+  }
+}
+
+function olvidarActivacion(): void {
+  try {
+    localStorage.removeItem(CLAVE_ACTIVACION);
+  } catch {
+    /* nada que hacer */
+  }
+}
+
 export default function ActivationPanel({ apiUrl }: Props) {
-  const [step, setStep] = useState<Step>("idle");
-  const [account, setAccount] = useState("");
+  const guardada = leerActivacion();
+  const [step, setStep] = useState<Step>(guardada ? "done" : "idle");
+  const [account, setAccount] = useState(guardada?.account ?? "");
   const [amountXrp, setAmountXrp] = useState("1");
   const [payload, setPayload] = useState<Payload | null>(null);
-  const [txid, setTxid] = useState<string | null>(null);
-  const [signedAt, setSignedAt] = useState<number | null>(null);
+  const [txid, setTxid] = useState<string | null>(guardada?.txid ?? null);
+  const [signedAt, setSignedAt] = useState<number | null>(guardada?.signedAt ?? null);
   const [error, setError] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -116,9 +166,13 @@ export default function ActivationPanel({ apiUrl }: Props) {
               return;
             }
             stopPolling();
+            const firmadoEn = Date.now();
             setTxid(status.txid);
-            setSignedAt(Date.now());
+            setSignedAt(firmadoEn);
             setStep("done");
+            // A partir de aquí la persona puede cerrar la pestaña: al volver
+            // encuentra el reclamo esperándola.
+            guardarActivacion({ txid: status.txid, signedAt: firmadoEn, account: account.trim() });
           } else if (status.cancelled || status.expired) {
             stopPolling();
             setStep("error");
@@ -173,6 +227,9 @@ export default function ActivationPanel({ apiUrl }: Props) {
             stopReclaimPolling();
             setReclaimTxid(status.txid);
             setReclaimStep("done");
+            // Reclamado: el registro ya no sirve y ofrecerlo otra vez daría
+            // tecNO_TARGET.
+            olvidarActivacion();
           } else if (status.cancelled || status.expired) {
             stopReclaimPolling();
             setReclaimStep("error");
@@ -332,6 +389,36 @@ export default function ActivationPanel({ apiUrl }: Props) {
             ✓ Activado on-chain
           </p>
           <code style={{ fontSize: "0.75rem", color: "#9ca3af", wordBreak: "break-all" }}>{txid}</code>
+          {/* Salida para quien vuelve a una activación ya reclamada desde otro
+              lado: sin esto se queda mirando un reclamo que fallaría, y sin
+              forma de empezar otra. */}
+          <button
+            type="button"
+            onClick={() => {
+              olvidarActivacion();
+              setStep("idle");
+              setTxid(null);
+              setSignedAt(null);
+              setReclaimStep("idle");
+              setReclaimPayload(null);
+              setReclaimTxid(null);
+              setReclaimError(null);
+            }}
+            style={{
+              display: "block",
+              margin: "0.9rem 0 0",
+              padding: 0,
+              background: "none",
+              border: "none",
+              color: "#6b7280",
+              fontSize: "0.75rem",
+              fontFamily: "inherit",
+              textDecoration: "underline",
+              cursor: "pointer",
+            }}
+          >
+            Empezar una activación nueva
+          </button>
         </div>
       )}
 
