@@ -180,12 +180,24 @@ export async function accountExists(address: string): Promise<boolean | null> {
  * falta como `OfferSequence` para cancelar el escrow que esa tx creó. No lo
  * devuelve Xaman: solo da el hash, hay que ir a buscarlo.
  */
-export async function fetchTxSequence(txHash: string): Promise<{ account: string; sequence: number } | null> {
+export async function fetchTxSequence(
+  txHash: string,
+): Promise<{ account: string; sequence: number; cancelAfterRipple?: number } | null> {
   return withClient(async (client) => {
     const res = await client.request({ command: "tx", transaction: txHash });
     const txJson = res.result.tx_json;
     if (!txJson || typeof txJson.Account !== "string" || typeof txJson.Sequence !== "number") return null;
-    return { account: txJson.Account, sequence: txJson.Sequence };
+    // El propio EscrowCreate ya trae su CancelAfter — leerlo de ahí evita
+    // depender de un Map en memoria (pendingCancelAfter, retirado) que un
+    // reinicio del proceso podía vaciar entre que se creaba el payload y
+    // que alguien consultaba su estado, dejando el escrow sin registrar en
+    // el sweeper sin ningún error visible.
+    const cancelAfter = "CancelAfter" in txJson ? txJson.CancelAfter : undefined;
+    return {
+      account: txJson.Account,
+      sequence: txJson.Sequence,
+      cancelAfterRipple: typeof cancelAfter === "number" ? cancelAfter : undefined,
+    };
   });
 }
 

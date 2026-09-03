@@ -35,15 +35,6 @@ export interface ActivationPayload {
 }
 
 /**
- * `cancelAfter` por uuid — lo decidimos nosotros al crear el payload, pero
- * Xaman no nos lo devuelve después. El sweeper lo necesita para saber cuándo
- * ya puede cancelar. En memoria: si el proceso se reinicia a medio camino,
- * el peor caso es un escrow que espera a que alguien lo cancele a mano —
- * el dinero no se pierde, solo se tarda.
- */
-const pendingCancelAfter = new Map<string, number>();
-
-/**
  * Margen entre que el usuario aprieta "firmar" en Xaman y que la tx entra a
  * un ledger validado. Cinco minutos es holgado: XRPL cierra ledger cada 3-5 s.
  */
@@ -103,11 +94,6 @@ export async function createActivationPayload(params: {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const created = await getSdk().payload.create({ txjson: tx, options: { expire } } as any);
   if (!created) throw new Error("Xaman no devolvió el payload");
-
-  // Number(): Omit<EscrowCreate, "Account"> pierde el tipo literal de
-  // CancelAfter en este cruce con xumm-sdk — en runtime siempre es number,
-  // lo pusimos dos líneas arriba.
-  pendingCancelAfter.set(created.uuid, Number(txFields.CancelAfter));
 
   return {
     uuid: created.uuid,
@@ -171,12 +157,3 @@ export async function getActivationPayloadStatus(uuid: string): Promise<Activati
   };
 }
 
-/** El `CancelAfter` (hora Ripple) que se le puso a este payload al crearlo. */
-export function getPendingCancelAfter(uuid: string): number | undefined {
-  return pendingCancelAfter.get(uuid);
-}
-
-/** Se llama una vez que ya se registró en el sweeper — no hace falta cargarlo en memoria dos veces. */
-export function clearPendingCancelAfter(uuid: string): void {
-  pendingCancelAfter.delete(uuid);
-}

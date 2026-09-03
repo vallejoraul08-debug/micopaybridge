@@ -4,8 +4,6 @@ import {
   createActivationPayload,
   createCancelPayload,
   getActivationPayloadStatus,
-  getPendingCancelAfter,
-  clearPendingCancelAfter,
   xummConfigured,
 } from "../lib/xumm.js";
 import { accountExists, fetchTxSequence } from "../lib/xrpl-leg.js";
@@ -135,25 +133,36 @@ export async function activationRoutes(fastify: FastifyInstance): Promise<void> 
         const status = await getActivationPayloadStatus(request.params.uuid);
 
         if (status.signed && status.txid && status.account && status.dispatchedResult === "tesSUCCESS") {
-          const cancelAfter = getPendingCancelAfter(request.params.uuid);
-          if (cancelAfter !== undefined) {
-            // Solo se registra una vez: en cuanto se limpia el pendiente,
-            // pollear de nuevo ya no vuelve a golpear el ledger por el Sequence.
-            clearPendingCancelAfter(request.params.uuid);
-            fetchTxSequence(status.txid)
-              .then((seq) => {
-                if (!seq) {
-                  request.log.warn(`no se encontró Sequence para ${status.txid} — el sweeper no podrá cancelarlo solo`);
-                  return;
-                }
-                trackActivationEscrow({
-                  owner: seq.account,
-                  offerSequence: seq.sequence,
-                  cancelAfterRipple: cancelAfter,
-                });
-              })
-              .catch((err) => request.log.error(err, "no se pudo registrar el escrow en el sweeper"));
-          }
+          // El CancelAfter se lee del propio EscrowCreate ya confirmado, no
+          // de un Map en memoria keyed por uuid — ese Map (retirado) tenía
+          // una ventana de carrera real: si el proceso se reiniciaba entre
+          // crear el payload y que alguien consultara su estado, la entrada
+          // desaparecía y el escrow quedaba sin registrar en el sweeper sin
+          // ningún error visible. Así se reprodujo en vivo el 2026-09-03.
+          //
+          // Se llama en cada poll que llega firmado, no solo el primero: es
+          // idempotente (INSERT ... ON CONFLICT DO NOTHING en Postgres, y el
+          // Map del sweeper se sobreescribe por la misma clave), así que
+          // repetir la llamada no tiene costo — y ahora basta con que UN
+          // poll después de firmar llegue a buen puerto, no exactamente el
+          // primero.
+          fetchTxSequence(status.txid)
+            .then((seq) => {
+              if (!seq) {
+                request.log.warn(`no se encontró Sequence para ${status.txid} — el sweeper no podrá cancelarlo solo`);
+                return;
+              }
+              if (seq.cancelAfterRipple === undefined) {
+                request.log.warn(`${status.txid} no trae CancelAfter — el sweeper no podrá cancelarlo solo`);
+                return;
+              }
+              trackActivationEscrow({
+                owner: seq.account,
+                offerSequence: seq.sequence,
+                cancelAfterRipple: seq.cancelAfterRipple,
+              });
+            })
+            .catch((err) => request.log.error(err, "no se pudo registrar el escrow en el sweeper"));
         }
 
         return reply.send(status);
